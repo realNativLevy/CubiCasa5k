@@ -611,44 +611,23 @@ def discrete_cmap():
     cm.register_cmap(cmap=cmap3)
 
 
-def segmentation_plot(rooms_pred, icons_pred, rooms_label, icons_label):
-    room_classes = ["Background", "Outdoor", "Wall", "Kitchen", "Living Room",
-                    "Bed Room", "Bath", "Entry", "Railing", "Storage", "Garage", "Undefined"]
-    icon_classes = ["No Icon", "Window", "Door", "Closet", "Electrical Applience",
-                    "Toilet", "Sink", "Sauna Bench", "Fire Place", "Bathtub", "Chimney"]
-    discrete_cmap()  # custom colormap
-
-    fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(30, 15))
-    axes[0].set_title('Room Ground Truth')
-    axes[0].imshow(rooms_label, cmap='rooms', vmin=0,
-                   vmax=len(room_classes) - 1)
-
-    axes[1].set_title('Room Prediction')
-    im = axes[1].imshow(rooms_pred, cmap='rooms', vmin=0,
-                        vmax=len(room_classes) - 1)
-
-    cbar_ax = fig.add_axes([0.85, 0.15, 0.05, 0.7])
-    cbar = fig.colorbar(im, cax=cbar_ax, ticks=np.arange(12) + 0.5)
-
-    fig.subplots_adjust(right=0.8)
-    cbar.ax.set_yticklabels(room_classes)
-    plt.show()
-
-    fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(30, 15))
-    axes[0].set_title('Icon Ground Truth')
-    axes[0].imshow(icons_label, cmap='icons', vmin=0,
-                   vmax=len(icon_classes) - 1)
-
-    axes[1].set_title('Icon Prediction')
-    im = axes[1].imshow(icons_pred, cmap='icons', vmin=0,
-                        vmax=len(icon_classes) - 1)
-
-    cbar_ax = fig.add_axes([0.85, 0.15, 0.05, 0.7])
-    cbar = fig.colorbar(im, cax=cbar_ax, ticks=np.arange(11) + 0.5)
-
-    fig.subplots_adjust(right=0.8)
-    cbar.ax.set_yticklabels(icon_classes)
-    plt.show()
+def segmentation_plot(segmentation, cmap='tab20', title=None, ax=None):
+    """Plot segmentation map
+    
+    Args:
+        segmentation: Segmentation map to plot
+        cmap: Colormap to use (default: 'tab20')
+        title: Optional title for the plot
+        ax: Optional matplotlib axis to plot on
+    """
+    if ax is None:
+        ax = plt.gca()
+    
+    im = ax.imshow(segmentation, cmap=cmap)
+    if title:
+        ax.set_title(title)
+    ax.axis('off')
+    return im
 
 
 def polygons_to_image(polygons, types, room_polygons, room_types, height, width):

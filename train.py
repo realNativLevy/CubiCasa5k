@@ -1,5 +1,5 @@
 import matplotlib
-matplotlib.use('pdf')
+matplotlib.use('Agg')
 import sys
 import os
 import logging
@@ -271,8 +271,9 @@ def train(args, log_dir, writer, logger):
                         if i == 4:
                             break
 
-                        images_val = samples_val['image'].cuda(non_blocking=True)
-                        labels_val = samples_val['label'].cuda(non_blocking=True)
+                        device = torch.device('cpu')
+                        images_val = samples_val['image'].to(device, non_blocking=True)
+                        labels_val = samples_val['label'].to(device, non_blocking=True)
 
                         if first_best:
                             # save image and label

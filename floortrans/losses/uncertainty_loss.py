@@ -7,7 +7,7 @@ import pandas as pd
 class UncertaintyLoss(Module):
     def __init__(self, input_slice=[21, 13, 17],
                  target_slice=[21, 1, 1], sub=0,
-                 cuda=True, mask=False):
+                 cuda=False, mask=False):
         super(UncertaintyLoss, self).__init__()
         self.input_slice = input_slice
         self.target_slice = target_slice
@@ -18,8 +18,9 @@ class UncertaintyLoss(Module):
         self.mask = mask
         self.sub = sub
         self.cuda = cuda
-        self.log_vars = Parameter(torch.tensor([0, 0], requires_grad=True, dtype=torch.float32).cuda())
-        self.log_vars_mse = Parameter(torch.zeros(input_slice[0], requires_grad=True, dtype=torch.float32).cuda())
+        device = torch.device('cpu')
+        self.log_vars = Parameter(torch.tensor([0, 0], requires_grad=True, dtype=torch.float32).to(device))
+        self.log_vars_mse = Parameter(torch.zeros(input_slice[0], requires_grad=True, dtype=torch.float32).to(device))
 
     def forward(self, input, target):
         n, c, h, w = input.size()
