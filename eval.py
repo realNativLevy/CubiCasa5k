@@ -11,13 +11,15 @@ from torch.utils import data
 from floortrans.models import get_model
 from floortrans.loaders import FloorplanSVG
 from floortrans.loaders.augmentations import DictToTensor, Compose
-from floortrans.metrics import get_evaluation_tensors, runningScore
+from floortrans.metrics import get_evaluation_tensors, runningScore, polygons_to_tensor
 from tqdm import tqdm
 import os
 from floortrans.plotting import segmentation_plot
 import matplotlib.pyplot as plt
 import cv2
 import shutil
+from floortrans import post_prosessing
+
 room_cls = ["Background", "Outdoor", "Wall", "Kitchen", "Living Room", "Bedroom", "Bath", "Hallway", "Railing", "Storage", "Garage", "Other rooms"]
 icon_cls = ["Empty", "Window", "Door", "Closet", "Electr. Appl.", "Toilet", "Sink", "Sauna bench", "Fire Place", "Bathtub", "Chimney"]
 
@@ -393,3 +395,86 @@ if __name__ == '__main__':
     plt.close()
     
     print(f"Results saved to {log_dir}")
+    
+    # Get image dimensions from the resized input image
+    height, width = fplan.shape[1], fplan.shape[2]  # since fplan is already channel-first
+    img_size = (height, width)
+    
+    # Process predictions with post-processing
+    heatmaps, rooms, icons = post_prosessing.split_prediction(pred, img_size, split)
+    
+    rooms_seg = np.argmax(rooms, axis=0)
+    icons_seg = np.argmax(icons, axis=0)
+    
+    all_opening_types = [1, 2]  # Window, Door
+    polygons, types, room_polygons, room_types = post_prosessing.get_polygons(
+        (heatmaps, rooms, icons), 0.4, all_opening_types)
+    
+    # Get aspect ratio from input image
+    input_aspect_ratio = fplan.shape[2] / fplan.shape[1]  # width/height
+    
+    # Calculate figure size maintaining aspect ratio
+    fig_height = 15
+    fig_width = fig_height * input_aspect_ratio
+    
+    # Create figure with correct aspect ratio
+    plt.figure(figsize=(fig_width, fig_height))
+    plt.title('Polygon Results')
+    plt.axis('off')
+    
+    # Plot room polygons
+    colors = plt.cm.tab20(np.linspace(0, 1, len(room_cls)))  # Color map for rooms
+    for polygon, room_type in zip(room_polygons, room_types):
+        # Extract integer class index from room_type; it might be a dict.
+        if isinstance(room_type, dict):
+            class_idx = room_type.get('class', 0)
+        else:
+            class_idx = int(room_type)
+
+        # If polygon is a Shapely polygon, get its exterior coordinates
+        if hasattr(polygon, 'exterior'):
+            polygon_coords = np.array(polygon.exterior.coords)
+        else:
+            polygon_coords = np.array(polygon)
+
+        if len(polygon_coords) >= 3:  # Valid polygon must have at least 3 points
+            plt.fill(polygon_coords[:, 0], polygon_coords[:, 1],
+                    color=colors[class_idx],
+                    alpha=0.5,
+                    label=room_cls[class_idx])
+            plt.plot(polygon_coords[:, 0], polygon_coords[:, 1],
+                    color='black',
+                    linewidth=1)
+    
+    # Plot opening polygons (windows, doors)
+    for polygon, opening_type in zip(polygons, types):
+        if hasattr(polygon, 'exterior'):
+            polygon_coords = np.array(polygon.exterior.coords)
+        else:
+            polygon_coords = np.array(polygon)
+
+        if len(polygon_coords) >= 3:
+            plt.fill(polygon_coords[:, 0], polygon_coords[:, 1],
+                    color='red' if opening_type == 1 else 'blue',  # red for windows, blue for doors
+                    alpha=0.7)
+            plt.plot(polygon_coords[:, 0], polygon_coords[:, 1],
+                    color='black',
+                    linewidth=1)
+    
+    plt.gca().set_aspect('equal')
+    plt.gca().invert_yaxis()
+    
+    # Add legend
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    plt.legend(by_label.values(), by_label.keys(), 
+              loc='center left', 
+              bbox_to_anchor=(1, 0.5))
+    
+    plt.savefig(os.path.join(log_dir, 'polygon_results.png'),
+                bbox_inches='tight',
+                dpi=300)
+    plt.close()
+    
+    print(f"Polygon results saved to {log_dir}")
+   
