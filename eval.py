@@ -1,6 +1,10 @@
+import matplotlib
+matplotlib.use('Agg')
+from mpl_toolkits.mplot3d import Axes3D   # Import this to register the '3d' projection
 import numpy as np
 import logging
 import argparse
+from tensorboardX import SummaryWriter
 import torch
 from datetime import datetime
 from torch.utils import data
@@ -9,13 +13,11 @@ from floortrans.loaders import FloorplanSVG
 from floortrans.loaders.augmentations import DictToTensor, Compose
 from floortrans.metrics import get_evaluation_tensors, runningScore
 from tqdm import tqdm
-import matplotlib
 import os
-matplotlib.use('Agg')  # Change from TkAgg to Agg
 from floortrans.plotting import segmentation_plot
 import matplotlib.pyplot as plt
 import cv2
-
+import shutil
 room_cls = ["Background", "Outdoor", "Wall", "Kitchen", "Living Room", "Bedroom", "Bath", "Hallway", "Railing", "Storage", "Garage", "Other rooms"]
 icon_cls = ["Empty", "Window", "Door", "Closet", "Electr. Appl.", "Toilet", "Sink", "Sauna bench", "Fire Place", "Bathtub", "Chimney"]
 
@@ -45,6 +47,46 @@ def print_res(name, res, cls_names, logger):
         logger.info(name + " & " + str(iou) + " & " + str(acc) + " \\\\ \\hline")
 
 
+def original_evaluate(args, log_dir, writer, logger):
+
+    normal_set = FloorplanSVG(args.data_path, 'test.txt', format='lmdb', lmdb_folder='cubi_lmdb/', augmentations=Compose([DictToTensor()]))
+    data_loader = data.DataLoader(normal_set, batch_size=1, num_workers=0)
+
+    checkpoint = torch.load(args.weights)
+    # Setup Model
+    model = get_model(args.arch, 51)
+    n_classes = args.n_classes
+    split = [21, 12, 11]
+    model.conv4_ = torch.nn.Conv2d(256, n_classes, bias=True, kernel_size=1)
+    model.upsample = torch.nn.ConvTranspose2d(n_classes, n_classes, kernel_size=4, stride=4)
+    model.load_state_dict(checkpoint['model_state'])
+    model.eval()
+    model.cuda()
+
+    score_seg_room = runningScore(12)
+    score_seg_icon = runningScore(11)
+    score_pol_seg_room = runningScore(12)
+    score_pol_seg_icon = runningScore(11)
+    with torch.no_grad():
+        for count, val in tqdm(enumerate(data_loader), total=len(data_loader),
+                               ncols=80, leave=False):
+            logger.info(count)
+            things = get_evaluation_tensors(val, model, split, logger, rotate=True)
+
+            label, segmentation, pol_segmentation = things
+
+            score_seg_room.update(label[0], segmentation[0])
+            score_seg_icon.update(label[1], segmentation[1])
+
+            score_pol_seg_room.update(label[0], pol_segmentation[0])
+            score_pol_seg_icon.update(label[1], pol_segmentation[1])
+
+    print_res("Room segmentation", score_seg_room.get_scores(), room_cls, logger)
+    print_res("Room polygon segmentation", score_pol_seg_room.get_scores(), room_cls, logger)
+    print_res("Icon segmentation", score_seg_icon.get_scores(), icon_cls, logger)
+    print_res("Icon polygon segmentation", score_pol_seg_icon.get_scores(), icon_cls, logger)
+
+
 def evaluate(args, log_dir, logger):
     normal_set = FloorplanSVG(args.data_path, 'test.txt', format='txt', augmentations=Compose([DictToTensor()]))
     data_loader = data.DataLoader(normal_set, batch_size=1, num_workers=0)
@@ -68,7 +110,7 @@ def evaluate(args, log_dir, logger):
     # Create output directory for visualizations
     vis_dir = os.path.join(log_dir, 'visualizations')
     os.makedirs(vis_dir, exist_ok=True)
-
+    print(f"Visualizations will be saved in: {vis_dir}")
     score_seg_room = runningScore(12)
     score_seg_icon = runningScore(11)
     score_pol_seg_room = runningScore(12)
@@ -78,6 +120,7 @@ def evaluate(args, log_dir, logger):
         for count, val in tqdm(enumerate(data_loader), total=len(data_loader),
                                ncols=80, leave=False):
             logger.info(count)
+            print(f"Processing floorplan {count}")
             
             # Get predictions
             things = get_evaluation_tensors(val, model, split, logger, rotate=True)
@@ -91,11 +134,12 @@ def evaluate(args, log_dir, logger):
             score_seg_icon.update(label[1], segmentation[1])
             score_pol_seg_room.update(label[0], pol_segmentation[0])
             score_pol_seg_icon.update(label[1], pol_segmentation[1])
+            
+            print(f"Generating visualizations for count: {count}")
+            generateWallMeshPlotImage(pol_segmentation, vis_dir, count)
+            generateFloorplanVariations(segmentation, pol_segmentation, vis_dir, count)
+            generateWallsPlotImage(pol_segmentation, vis_dir, count)
 
-    generateWallMeshPlotImage(pol_segmentation, vis_dir, count)
-    generateFloorplanVariations(segmentation, pol_segmentation, vis_dir, count)
-    generateWallsPlotImage(pol_segmentation)
-    
     # Print metrics
     print_res("Room segmentation", score_seg_room.get_scores(), room_cls, logger)
     print_res("Room polygon segmentation", score_pol_seg_room.get_scores(), room_cls, logger)
@@ -124,15 +168,19 @@ def generateWallMeshPlotImage(pol_segmentation, vis_dir, count):
         if len(contour.shape) >= 2:
             # Create wall surface points
             x = contour[:, 0]
-            y = contour[:, 1] 
+            y = contour[:, 1]
             z = np.zeros_like(x)
-            
+
             # Plot vertical walls
             for i in range(len(x)-1):
                 wall_x = [x[i], x[i], x[i+1], x[i+1]]
                 wall_y = [y[i], y[i], y[i+1], y[i+1]]
                 wall_z = [0, wall_height, wall_height, 0]
-                
+
+                # Ensure we have at least 3 unique points for triangulation
+                if len(np.unique(wall_x)) < 3 or len(np.unique(wall_y)) < 3:
+                    continue
+
                 # Create wall surface
                 ax.plot_trisurf(wall_x, wall_y, wall_z, color='gray', alpha=0.7)
 
@@ -145,6 +193,7 @@ def generateWallMeshPlotImage(pol_segmentation, vis_dir, count):
     ax.set_zlabel('Z')
     ax.set_title('3D Wall Mesh')
 
+    print(f"Full path: {os.path.join(vis_dir, f'wall_mesh_{count}.png')}")
     # Save figure
     plt.savefig(os.path.join(vis_dir, f'wall_mesh_{count}.png'),
                 bbox_inches='tight',
@@ -175,6 +224,8 @@ def generateFloorplanVariations(segmentation, pol_segmentation, vis_dir, count):
     plt.sca(axes[1,1])
     axes[1,1].set_title('Icon Polygon Segmentation')
     segmentation_plot(pol_segmentation[1])
+
+    print(f"Full path: {os.path.join(vis_dir, f'floorplan_{count}.png')}")
 
     # Save regular visualization
     plt.savefig(os.path.join(vis_dir, f'floorplan_{count}.png'))
@@ -208,7 +259,7 @@ def generateWallsPlotImage(pol_segmentation, vis_dir, count):
     # Set equal aspect ratio and invert y-axis for proper wall display
     plt.gca().set_aspect('equal')
     plt.gca().invert_yaxis()
-    
+    print(f"Full path: {os.path.join(vis_dir, f'walls_only_{count}.png')}")
     plt.savefig(os.path.join(vis_dir, f'walls_only_{count}.png'), 
                 bbox_inches='tight', 
                 dpi=300)
@@ -227,66 +278,42 @@ def evaluate_all_floorplans(args, logger):
     print(f"Found {len(subdirs)} floorplans to process")
     
     for subdir in tqdm(subdirs, desc="Processing floorplans"):
-        # Create a temporary test.txt file in the subdir with just this floorplan
+
         floorplan_name = os.path.basename(subdir)
-        temp_test_file = os.path.join(subdir, 'test.txt')
-        with open(temp_test_file, 'w') as f:
-            f.write(f"high_quality_architectural/{floorplan_name}")
-        
+      
         # Update args for this specific floorplan
         args.log_path = subdir  # Save outputs in the same directory as input
         
         # Create timestamp directory inside the floorplan directory
         time_stamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+        # Remove any existing evaluation_ folders
+        for item in os.listdir(subdir):
+            if item.startswith('evaluation_'):
+                try:
+                    shutil.rmtree(os.path.join(subdir, item))
+                    print(f"Removed {item}")
+                except PermissionError:
+                    print(f"Permission denied when trying to remove {item}")
+                except FileNotFoundError:
+                    print(f"Directory {item} does not exist")
+                except Exception as e:
+                    print(f"Error removing {item}: {str(e)}")
+                    
         log_dir = os.path.join(subdir, 'evaluation_' + time_stamp)
         os.makedirs(log_dir, exist_ok=True)
         
+        print(f"Processing {floorplan_name}")
+        print(f"Log directory: {log_dir}")
+        print(f"Args: {args}")
         try:
             # Evaluate this floorplan
             evaluate(args, log_dir, logger)
             print(f"Successfully processed {floorplan_name}")
         except Exception as e:
-            print(f"Error processing {floorplan_name}: {str(e)}")
-        finally:
-            # Clean up temporary test file
-            if os.path.exists(temp_test_file):
-                os.remove(temp_test_file)
-
-# if __name__ == '__main__1':
-    time_stamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
-    parser = argparse.ArgumentParser(description='Settings for evaluation')
-    parser.add_argument('--arch', nargs='?', type=str, default='hg_furukawa_original',
-                        help='Architecture to use [\'hg_furukawa_original, segnet etc\']')
-    parser.add_argument('--data-path', nargs='?', type=str, default='data/cubicasa5k/',
-                        help='Path to data directory')
-    parser.add_argument('--n-classes', nargs='?', type=int, default=44,
-                        help='# of the epochs')
-    parser.add_argument('--weights', nargs='?', type=str, default=None,
-                        help='Path to previously trained model weights file .pkl')
-    parser.add_argument('--log-path', nargs='?', type=str, default='runs_cubi/',
-                        help='Path to log directory')
-    parser.add_argument('--output-path', nargs='?', type=str, default='runs_cubi_out/',
-                        help='Path to output directory')
-
-    args = parser.parse_args()
-    print("Instance of args: ", args)
-    log_dir = args.log_path + '/' + time_stamp + '/'
-
-    # Create the directory if it doesn't exist
-    os.makedirs(log_dir, exist_ok=True) 
-
-    logger = logging.getLogger('eval')
-    logger.setLevel(logging.DEBUG)
-    fh = logging.FileHandler(log_dir+'/eval.log')
-    fh.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
-
-    evaluate(args, log_dir, logger)
-
+            print(f"Error processing {floorplan_name}: {str(e)}")         
 
 if __name__ == '__main__':
+    print("Evaluating single floorplan")
     time_stamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
     parser = argparse.ArgumentParser(description='Settings for evaluation')
     parser.add_argument('--arch', nargs='?', type=str, default='hg_furukawa_original',
@@ -305,16 +332,64 @@ if __name__ == '__main__':
     args = parser.parse_args()
     print("Instance of args: ", args)
     log_dir = args.log_path + '/' + time_stamp + '/'
-
-    # Create the directory if it doesn't exist
-    os.makedirs(log_dir, exist_ok=True) 
-
-    logger = logging.getLogger('eval')
-    logger.setLevel(logging.DEBUG)
-    fh = logging.FileHandler(log_dir+'/eval.log')
-    fh.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
-    print("Evaluating all floorplans")
-    evaluate_all_floorplans(args,logger)
+    os.makedirs(log_dir, exist_ok=True)  # Create log directory
+    
+    # Setup device and model
+    device = torch.device('cpu')
+    checkpoint = torch.load(args.weights, map_location=device)
+    
+    # Load and preprocess image
+    fplan = cv2.imread('F1_original.png')
+    if fplan is None:
+        raise ValueError("Failed to load F1_original.png")
+        
+    # Resize image if needed (adjust size as needed)
+    fplan = cv2.resize(fplan, (512, 512))
+    
+    # Preprocess image
+    fplan = cv2.cvtColor(fplan, cv2.COLOR_BGR2RGB)
+    fplan = np.moveaxis(fplan, -1, 0)
+    fplan = 2 * (fplan / 255.0) - 1
+    image = torch.FloatTensor(fplan).unsqueeze(0)
+    
+    # Setup Model
+    model = get_model(args.arch, 51)
+    n_classes = args.n_classes
+    split = [21, 12, 11]
+    model.conv4_ = torch.nn.Conv2d(256, n_classes, bias=True, kernel_size=1)
+    model.upsample = torch.nn.ConvTranspose2d(n_classes, n_classes, kernel_size=4, stride=4)
+    model.load_state_dict(checkpoint['model_state'])
+    model.eval()  # Set to evaluation mode
+    
+    # Get predictions
+    with torch.no_grad():
+        pred = model(image)
+        
+    # Process predictions
+    segmentation = pred[:, :split[0]]  # Room segmentation
+    icon_pred = pred[:, split[0]:split[0]+split[1]]  # Icon segmentation
+    
+    # Convert to numpy for visualization
+    room_seg = torch.argmax(segmentation, dim=1).numpy()[0]
+    icon_seg = torch.argmax(icon_pred, dim=1).numpy()[0]
+    
+    # Visualize results
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(131)
+    plt.title('Original Image')
+    plt.imshow(np.moveaxis(fplan, 0, -1))
+    
+    plt.subplot(132)
+    plt.title('Room Segmentation')
+    segmentation_plot(room_seg)
+    
+    plt.subplot(133)
+    plt.title('Icon Segmentation')
+    segmentation_plot(icon_seg)
+    
+    # Save results
+    plt.savefig(os.path.join(log_dir, 'prediction_results.png'))
+    plt.close()
+    
+    print(f"Results saved to {log_dir}")
